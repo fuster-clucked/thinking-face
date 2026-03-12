@@ -1,0 +1,68 @@
+name: AWS Workspace - Stop
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        type: string
+        default: eu-south-2
+
+  workflow_call:
+    inputs:
+      region:
+        type: string
+        default: eu-south-2
+
+permissions:
+  id-token: write
+
+concurrency:
+  group: thinkingface-${{ github.repository }}
+  queue: max
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.2
+        with:
+          role-to-assume: ${{ vars.AWS_THINKINGFACE_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Resolve AWS resource IDs
+        id: resource
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          normalize() {
+            printf '%s' "$1" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed --regexp-extended 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+          }
+          WORKSPACE="$(
+            printf '%s-' "$(normalize "$REPO" | cut --characters=1-32)"
+            printf '%s' "$REPO" | sha256sum | cut --characters=1-8
+          )"
+          echo "instance=thinkingface-$WORKSPACE-instance" >> $GITHUB_OUTPUT
+
+      - name: Resolve AWS EC2 spot request
+        id: spot
+        env:
+          INSTANCE: ${{ steps.resource.outputs.instance }}
+        run: |
+          INSTANCE=$(aws ec2 describe-spot-instance-requests \
+            --output text \
+            --query 'SpotInstanceRequests[0].InstanceId' \
+            --filters \
+              "Name=tag:Name,Values=$INSTANCE" \
+              "Name=state,Values=open,active,disabled")
+          echo "instance=$INSTANCE" >> $GITHUB_OUTPUT
+
+      - name: Stop AWS EC2 instance
+        env:
+          INSTANCE: ${{ steps.spot.outputs.instance }}
+        run: |
+          aws ec2 stop-instances --instance-ids "$INSTANCE"
+          aws ec2 wait instance-stopped --instance-ids "$INSTANCE"

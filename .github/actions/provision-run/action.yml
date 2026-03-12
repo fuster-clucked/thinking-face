@@ -1,0 +1,50 @@
+name: Run AWS SSM provisioning command
+
+inputs:
+  region:
+    required: true
+  repo-name:
+    required: true
+  repo-ref:
+    required: true
+  gpu:
+    required: true
+  token:
+    required: true
+  instance:
+    required: true
+
+outputs:
+  id:
+    value: ${{ steps.command.outputs.id }}
+
+runs:
+  using: composite
+
+  steps:
+    - name: Run AWS SSM provisioning command
+      id: command
+      shell: bash
+      env:
+        REGION: ${{ inputs.region }}
+        GPU: ${{ inputs.gpu }}
+        REPO_NAME: ${{ inputs.repo-name }}
+        REPO_REF: ${{ inputs.repo-ref }}
+        TOKEN: ${{ inputs.token }}
+        INSTANCE: ${{ inputs.instance }}
+      run: |
+        COMMAND=$({
+          printf 'export AWS_DEFAULT_REGION=%q\n' "$REGION"
+          printf 'GPU=%q\n' "$GPU"
+          printf 'REPO_NAME=%q\n' "$REPO_NAME"
+          printf 'REPO_REF=%q\n' "$REPO_REF"
+          printf 'TOKEN=%q\n' "$TOKEN"
+          cat "$GITHUB_ACTION_PATH/run.sh"
+        } | base64 --wrap=0)
+        ID=$(aws ssm send-command \
+          --output text \
+          --query 'Command.CommandId' \
+          --document-name AWS-RunShellScript \
+          --instance-ids "$INSTANCE" \
+          --parameters "{\"commands\":[\"echo '$COMMAND' | base64 --decode | bash 2>&1\"]}")
+        echo "id=$ID" >> $GITHUB_OUTPUT

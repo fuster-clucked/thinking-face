@@ -1,0 +1,102 @@
+name: AWS Workspace - Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        type: string
+        default: eu-south-2
+
+  workflow_call:
+    inputs:
+      region:
+        type: string
+        default: eu-south-2
+
+permissions:
+  id-token: write
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.2
+        with:
+          role-to-assume: ${{ vars.AWS_THINKINGFACE_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Resolve AWS resource IDs
+        id: resource
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          normalize() {
+            printf '%s' "$1" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed --regexp-extended 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+          }
+          WORKSPACE="$(
+            printf '%s-' "$(normalize "$REPO" | cut --characters=1-32)"
+            printf '%s' "$REPO" | sha256sum | cut --characters=1-8
+          )"
+          {
+            echo "group=thinkingface-$WORKSPACE-group"
+            echo "role=thinkingface-$WORKSPACE-role"
+            echo "profile=thinkingface-$WORKSPACE-profile"
+            echo "policy=thinkingface-$WORKSPACE-policy"
+            echo "token=/thinkingface/$WORKSPACE/GH_TOKEN"
+          } >> $GITHUB_OUTPUT
+
+      - name: Delete AWS SSM GitHub token parameter
+        env:
+          TOKEN: ${{ steps.resource.outputs.token }}
+        run: |
+          OUT=$(aws ssm delete-parameter --name "$TOKEN" 2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bParameterNotFound\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      - name: Destroy AWS EC2 security group
+        env:
+          GROUP: ${{ steps.resource.outputs.group }}
+        run: |
+          OUT=$(aws ec2 delete-security-group --group-name "$GROUP" 2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bInvalidGroup.NotFound\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      - name: Detach AWS IAM instance profile role
+        env:
+          ROLE: ${{ steps.resource.outputs.role }}
+          PROFILE: ${{ steps.resource.outputs.profile }}
+        run: |
+          OUT=$(aws iam remove-role-from-instance-profile \
+            --instance-profile-name "$PROFILE" \
+            --role-name "$ROLE" \
+          2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bNoSuchEntity\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      - name: Destroy AWS IAM instance profile
+        env:
+          PROFILE: ${{ steps.resource.outputs.profile }}
+        run: |
+          OUT=$(aws iam delete-instance-profile \
+            --instance-profile-name "$PROFILE" \
+          2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bNoSuchEntity\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      - name: Destroy AWS IAM SSM policy
+        env:
+          ROLE: ${{ steps.resource.outputs.role }}
+          POLICY: ${{ steps.resource.outputs.policy }}
+        run: |
+          OUT=$(aws iam delete-role-policy \
+            --role-name "$ROLE" \
+            --policy-name "$POLICY" \
+          2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bNoSuchEntity\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      - name: Destroy AWS IAM role
+        env:
+          ROLE: ${{ steps.resource.outputs.role }}
+        run: |
+          OUT=$(aws iam delete-role --role-name "$ROLE" 2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bNoSuchEntity\b" || { echo "$OUT" >&2; exit $RC; }; }

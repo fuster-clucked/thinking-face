@@ -1,0 +1,497 @@
+name: AWS Workspace - Launch
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        type: string
+        default: eu-south-2
+
+  workflow_call:
+    inputs:
+      region:
+        type: string
+        default: eu-south-2
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: thinkingface-${{ github.repository }}
+  queue: max
+
+jobs:
+  launch:
+    runs-on: ubuntu-latest
+
+    # TODO terminate the instance if it already exists
+    steps:
+      - name: Install Dev Container CLI
+        run: |
+          # TODO keep this version of devcontainer in sync with the version used in run.sh
+          curl --fail --show-error --location \
+              https://raw.githubusercontent.com/devcontainers/cli/main/scripts/install.sh \
+          | sh -s -- --version 0.88.0 --prefix=.local
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.2.2
+        with:
+          role-to-assume: ${{ vars.AWS_THINKINGFACE_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      # TODO copy this checkout into the instance and container
+      #      rather than doing a second checkout during provisioning
+      - name: Checkout GitHub repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          path: workspace
+
+      - name: Resolve Dev Container configuration
+        id: container
+        run: |
+          GPU=$(
+            .local/bin/devcontainer read-configuration \
+              --workspace-folder "$GITHUB_WORKSPACE/workspace" \
+            | jq .configuration.hostRequirements.gpu
+          )
+          echo "gpu=$GPU" >> $GITHUB_OUTPUT
+
+      - name: Configure AWS resources
+        id: resource
+        env:
+          REPO: ${{ github.repository }}
+          GPU: ${{ steps.container.outputs.gpu }}
+        run: |
+          normalize() {
+            printf '%s' "$1" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed --regexp-extended 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+          }
+          WORKSPACE="$(
+            printf '%s-' "$(normalize "$REPO" | cut --characters=1-32)"
+            printf '%s' "$REPO" | sha256sum | cut --characters=1-8
+          )"
+          if [ "${GPU,,}" = "true" ]; then
+            TYPE="g6.xlarge"
+          else
+            TYPE="m7i-flex.large"
+          fi
+          {
+            echo "group=thinkingface-$WORKSPACE-group"
+            echo "role=thinkingface-$WORKSPACE-role"
+            echo "profile=thinkingface-$WORKSPACE-profile"
+            echo "policy=thinkingface-$WORKSPACE-policy"
+            echo "instance=thinkingface-$WORKSPACE-instance"
+            echo "token=/thinkingface/$WORKSPACE/GH_TOKEN"
+            echo "type=$TYPE"
+          } >> $GITHUB_OUTPUT
+
+      - name: Resolve AWS account ID
+        id: account
+        run: |
+          ID=$(aws sts get-caller-identity --output text --query Account)
+          echo "id=$ID" >> $GITHUB_OUTPUT
+
+      - name: Destroy AWS EC2 security group
+        env:
+          GROUP: ${{ steps.resource.outputs.group }}
+        run: |
+          OUT=$(aws ec2 delete-security-group --group-name "$GROUP" 2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bInvalidGroup.NotFound\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      - name: Ensure AWS IAM role
+        env:
+          REPO: ${{ github.repository }}
+          ROLE: ${{ steps.resource.outputs.role }}
+        run: |
+          POLICY='{
+            "Version":"2012-10-17",
+            "Statement":[{
+              "Effect":"Allow",
+              "Principal":{"Service":"ec2.amazonaws.com"},
+              "Action":"sts:AssumeRole"
+            }]
+          }'
+          TAGS=$(cat <<EOF
+          [
+            {"Key":"Owner","Value":"thinkingface"},
+            {"Key":"Project","Value":"$REPO"},
+            {"Key":"Name","Value":"$ROLE"}
+          ]
+          EOF
+          )
+          OUT=$(aws iam create-role \
+            --role-name "$ROLE" \
+            --assume-role-policy-document "$POLICY" \
+            --tags "$TAGS" \
+          2>&1) \
+          && exit 0 \
+          || { \
+            RC=$?; \
+            echo "$OUT" | grep --extended-regexp "\bEntityAlreadyExists\b" \
+            || { echo "$OUT" >&2; exit $RC; }; \
+          }
+          # TODO separate these into separate steps?
+          aws iam update-assume-role-policy \
+            --role-name "$ROLE" \
+            --policy-document "$POLICY"
+          aws iam tag-role \
+            --role-name "$ROLE" \
+            --tags "$TAGS"
+
+      - name: Ensure AWS IAM SSM policy
+        env:
+          ACCOUNT: ${{ steps.account.outputs.id }}
+          ROLE: ${{ steps.resource.outputs.role }}
+          POLICY: ${{ steps.resource.outputs.policy }}
+          TOKEN: ${{ steps.resource.outputs.token }}
+        run: |
+          # TODO narrow down exactly which resources are allowed for the given actions
+          aws iam put-role-policy \
+            --role-name "$ROLE" \
+            --policy-name "$POLICY" \
+            --policy-document "{
+              \"Version\": \"2012-10-17\",
+              \"Statement\": [
+                {
+                  \"Effect\": \"Allow\",
+                  \"Action\": [
+                    \"ssmmessages:CreateControlChannel\",
+                    \"ssmmessages:CreateDataChannel\",
+                    \"ssmmessages:OpenControlChannel\",
+                    \"ssmmessages:OpenDataChannel\",
+                    \"ec2messages:AcknowledgeMessage\",
+                    \"ec2messages:DeleteMessage\",
+                    \"ec2messages:FailMessage\",
+                    \"ec2messages:GetEndpoint\",
+                    \"ec2messages:GetMessages\",
+                    \"ec2messages:SendReply\",
+                    \"ssm:UpdateInstanceInformation\"
+                  ],
+                  \"Resource\": \"*\"
+                },
+                {
+                  \"Effect\": \"Allow\",
+                  \"Action\": [\"ssm:GetParameter\"],
+                  \"Resource\": [
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/wireguard/SERVER_KEY\",
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/wireguard/CLIENT_PUB\",
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/caddy/CA_KEY\",
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/caddy/CA_CRT\",
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/thinkingface/CS_PASSWORD\",
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter/thinkingface/DCV_PASSWORD\",
+                    \"arn:aws:ssm:$AWS_REGION:$ACCOUNT:parameter$TOKEN\"
+                  ]
+                }
+              ]
+            }"
+
+      - name: Ensure AWS IAM instance profile
+        env:
+          REPO: ${{ github.repository }}
+          PROFILE: ${{ steps.resource.outputs.profile }}
+        run: |
+          TAGS=$(cat <<EOF
+          [
+            {"Key":"Owner","Value":"thinkingface"},
+            {"Key":"Project","Value":"$REPO"},
+            {"Key":"Name","Value":"$PROFILE"}
+          ]
+          EOF
+          )
+          OUT=$(aws iam create-instance-profile \
+            --instance-profile-name "$PROFILE" \
+            --tags "$TAGS" \
+          2>&1) \
+          && exit 0 \
+          || { \
+            RC=$?; \
+            echo "$OUT" | grep --extended-regexp "\bEntityAlreadyExists\b" \
+            || { echo "$OUT" >&2; exit $RC; }; \
+          }
+          # TODO separate this into a separate step?
+          aws iam tag-instance-profile \
+            --instance-profile-name "$PROFILE" \
+            --tags "$TAGS"
+
+      - name: Ensure AWS IAM instance profile role
+        env:
+          ROLE: ${{ steps.resource.outputs.role }}
+          PROFILE: ${{ steps.resource.outputs.profile }}
+        run: |
+          NAME=$(aws iam get-instance-profile \
+            --output text \
+            --query 'InstanceProfile.Roles[0].RoleName' \
+            --instance-profile-name "$PROFILE" \
+          )
+          if [[ "$NAME" == "$ROLE" ]]; then
+            exit 0
+          elif [[ "$NAME" != "None" ]]; then
+            aws iam remove-role-from-instance-profile \
+              --instance-profile-name "$PROFILE" \
+              --role-name "$NAME"
+          fi
+          aws iam add-role-to-instance-profile \
+            --instance-profile-name "$PROFILE" \
+            --role-name "$ROLE"
+
+      - name: Create AWS EC2 security group
+        id: group
+        env:
+          REPO: ${{ github.repository }}
+          GROUP: ${{ steps.resource.outputs.group }}
+        run: |
+          ID=$(aws ec2 create-security-group \
+            --output text \
+            --query 'GroupId' \
+            --group-name "$GROUP" \
+            --description "$GROUP" \
+            --tag-specifications "[{
+              \"ResourceType\":\"security-group\",
+              \"Tags\":[
+                {\"Key\":\"Owner\",\"Value\":\"thinkingface\"},
+                {\"Key\":\"Project\",\"Value\":\"$REPO\"},
+                {\"Key\":\"Name\",\"Value\":\"$GROUP\"}
+              ]
+            }]"
+          )
+          echo "id=$ID" >> $GITHUB_OUTPUT
+
+      - name: Create AWS EC2 WireGuard ingress rule
+        env:
+          GROUP: ${{ steps.group.outputs.id }}
+        run: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id "$GROUP" \
+            --protocol udp \
+            --cidr 0.0.0.0/0 \
+            --port 51820
+
+      - name: Resolve AWS EC2 AMI
+        id: ami
+        env:
+          GPU: ${{ steps.container.outputs.gpu }}
+        run: |
+          if [ "${GPU,,}" = "true" ]; then
+            # TODO use /aws/service SSM parameters rather than display names to resolve the AMI IDs
+            #      should be /aws/service/deeplearning/ami/x86_64/base-with-single-cuda-ubuntu-24.04/latest/ami-id for GPU here
+            OWNER="amazon"
+            NAME="Deep Learning Base AMI with Single CUDA (Ubuntu 24.04) *"
+          else
+            OWNER="099720109477"
+            NAME="ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+          fi
+          read -r ID PLATFORM < <(
+            aws ec2 describe-images \
+              --output text \
+              --query 'sort_by(Images,&CreationDate)[-1].[ImageId,PlatformDetails]' \
+              --owners "$OWNER" \
+              --filters \
+                "Name=name,Values=$NAME" \
+                "Name=architecture,Values=x86_64" \
+                "Name=state,Values=available"
+          )
+          {
+            echo "id=$ID"
+            echo "platform=$PLATFORM"
+          } >> $GITHUB_OUTPUT
+
+      - name: Launch AWS EC2 instance
+        id: instance
+        env:
+          REPO: ${{ github.repository }}
+          PROFILE: ${{ steps.resource.outputs.profile }}
+          INSTANCE: ${{ steps.resource.outputs.instance }}
+          TYPE: ${{ steps.resource.outputs.type }}
+          GROUP: ${{ steps.group.outputs.id }}
+          AMI: ${{ steps.ami.outputs.id }}
+        run: |
+          # TODO use different Name tags for instance, volumne, and spot request
+          #      (update terminate.yml action if spot request Name tag is changed)
+          TAGS=$(cat <<EOF
+          [
+            {"Key":"Owner","Value":"thinkingface"},
+            {"Key":"Project","Value":"$REPO"},
+            {"Key":"Name","Value":"$INSTANCE"}
+          ]
+          EOF
+          )
+          # TODO volume size should be configurable
+          read -r ID ZONE SPOT < <(
+            aws ec2 run-instances \
+              --output text \
+              --query 'Instances[0].[InstanceId,Placement.AvailabilityZone,SpotInstanceRequestId]' \
+              --instance-type "$TYPE" \
+              --image-id "$AMI" \
+              --iam-instance-profile "Name=$PROFILE" \
+              --security-group-ids "$GROUP" \
+              --metadata-options 'HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1' \
+              --instance-market-options '{
+                "MarketType": "spot",
+                "SpotOptions": {
+                  "SpotInstanceType": "persistent",
+                  "InstanceInterruptionBehavior": "stop"
+                }
+              }' \
+              --block-device-mappings '[{
+                "DeviceName":"/dev/sda1",
+                "Ebs":{
+                  "Encrypted":true,
+                  "VolumeType":"gp3",
+                  "VolumeSize": 256,
+                  "DeleteOnTermination":true
+                }
+              }]' \
+              --tag-specifications "[{
+                \"ResourceType\":\"instance\",
+                \"Tags\":$TAGS
+              }, {
+                \"ResourceType\":\"spot-instances-request\",
+                \"Tags\":$TAGS
+              }, {
+                \"ResourceType\":\"volume\",
+                \"Tags\":$TAGS
+              }]"
+          )
+          {
+            echo "id=$ID"
+            echo "zone=$ZONE"
+            echo "spot=$SPOT"
+          } >> $GITHUB_OUTPUT
+
+      - name: Await AWS SSM agent
+        env:
+          INSTANCE: ${{ steps.instance.outputs.id }}
+        run: |
+          for ((i = 1; i <= 30; i++)); do
+            OUT=$(aws ssm describe-instance-information \
+              --output text \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --filters "Key=InstanceIds,Values=$INSTANCE" \
+            2>&1) \
+            || { RC=$?; echo "$OUT" >&2; exit $RC; }
+            if [ "$OUT" = "Online" ]; then
+              exit 0
+            fi
+            echo "Attempt $i/30: $OUT..."
+            sleep 5
+          done
+          echo '::error::AWS SSM Agent is not online'
+          exit 1
+
+      - name: Resolve AWS EC2 public IP
+        env:
+          INSTANCE: ${{ steps.instance.outputs.id }}
+        run: |
+          IP=$(aws ec2 describe-instances \
+            --output text \
+            --query 'Reservations[0].Instances[0].PublicIpAddress' \
+            --instance-ids "$INSTANCE")
+          echo "::notice title=Public IP::$IP"
+
+      - name: Resolve AWS EC2 spot price
+        env:
+          TYPE: ${{ steps.resource.outputs.type }}
+          PLATFORM: ${{ steps.ami.outputs.platform }}
+          ZONE: ${{ steps.instance.outputs.zone }}
+        run: |
+          # TODO prices vary between availability zones
+          #      maybe choose the availability zone with the cheapest spot price
+          PRICE=$(aws ec2 describe-spot-price-history \
+            --output text \
+            --query 'SpotPriceHistory[0].SpotPrice' \
+            --max-items 1 \
+            --region "$AWS_REGION" \
+            --availability-zone "$ZONE" \
+            --product-descriptions "$PLATFORM" \
+            --instance-types "$TYPE" \
+            --start-time "$(date -u +%Y-%m-%dT%H:%M:%SZ)")
+          echo "::notice title=Spot Price::$PRICE"
+
+      - name: Ensure AWS SSM GitHub token parameter
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TOKEN: ${{ steps.resource.outputs.token }}
+        run: |
+          aws ssm put-parameter \
+            --type SecureString \
+            --name "$TOKEN" \
+            --value "$GH_TOKEN" \
+            --overwrite
+
+      - name: Run AWS SSM provisioning command
+        id: command
+        uses: fuster-clucked/thinking-face/.github/actions/provision-run@wip
+        with:
+          region: ${{ inputs.region }}
+          repo-name: ${{ github.repository }}
+          repo-ref: ${{ github.ref }}
+          gpu: ${{ steps.container.outputs.gpu }}
+          token: ${{ steps.resource.outputs.token }}
+          instance: ${{ steps.instance.outputs.id }}
+
+      - name: Await AWS SSM provisioning command
+        id: provision
+        env:
+          INSTANCE: ${{ steps.instance.outputs.id }}
+          COMMAND: ${{ steps.command.outputs.id }}
+        run: |
+          print_output() {
+            aws ssm get-command-invocation \
+              --output text \
+              --query StandardOutputContent \
+              --instance-id "$INSTANCE" \
+              --command-id "$COMMAND"
+          }
+          # TODO wait duration should be configurable
+          for ((i = 1; i <= 120; i++)); do
+            OUT=$(aws ssm get-command-invocation \
+              --output text \
+              --query '[StatusDetails, ResponseCode]' \
+              --instance-id "$INSTANCE" \
+              --command-id "$COMMAND" \
+            2>&1) \
+            || { RC=$?; echo "$OUT" >&2; exit $RC; }
+            STATUS=$(echo "$OUT" | awk '{print $1}')
+            RC=$(echo "$OUT" | awk '{print $2}')
+            if [ "$STATUS" = "Success" ]; then
+              print_output
+              exit 0
+            elif [ "$STATUS" = "Failed" ]; then
+              echo "Attempt $i/120: $STATUS..."
+              print_output >&2
+              exit $RC
+            fi
+            echo "Attempt $i/120: $STATUS..."
+            sleep 5
+          done
+          echo '::error::AWS SSM provisioning command is not finished'
+          print_output >&2
+          exit 1
+
+      - name: Delete AWS SSM GitHub token parameter
+        if: ${{ always() }}
+        env:
+          TOKEN: ${{ steps.resource.outputs.token }}
+        run: |
+          OUT=$(aws ssm delete-parameter --name "$TOKEN" 2>&1) \
+          || { RC=$?; echo "$OUT" | grep --extended-regexp "\bParameterNotFound\b" || { echo "$OUT" >&2; exit $RC; }; }
+
+      # TODO should the instance optionally be left running for troubleshooting?
+      - name: Terminate AWS EC2 instance
+        # TODO probably doesn't need to check `steps.instance.outputs.id` (gracefully ignore error if instance doesn't exist)
+        if: >-
+          ${{
+            always() &&
+            steps.instance.outputs.id != '' &&
+            steps.provision.outcome != 'success'
+          }}
+        env:
+          INSTANCE: ${{ steps.instance.outputs.id }}
+          SPOT: ${{ steps.instance.outputs.spot }}
+        run: |
+          aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
+          aws ec2 terminate-instances --instance-ids "$INSTANCE"
+          aws ec2 wait instance-terminated --instance-ids "$INSTANCE"

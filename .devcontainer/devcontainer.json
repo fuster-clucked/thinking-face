@@ -5,5 +5,8 @@
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "XAUTHORITY": "${localEnv:XAUTHORITY}",
+  },
+  "hostRequirements": {
+    "gpu": true
   }
 }

@@ -3,6 +3,8 @@ name: Run AWS SSM provisioning command
 inputs:
   region:
     required: true
+  wireguard:
+    required: true
   repo-name:
     required: true
   repo-ref:
@@ -27,6 +29,7 @@ runs:
       shell: bash
       env:
         REGION: ${{ inputs.region }}
+        WIREGUARD: ${{ inputs.wireguard }}
         GPU: ${{ inputs.gpu }}
         REPO_NAME: ${{ inputs.repo-name }}
         REPO_REF: ${{ inputs.repo-ref }}
@@ -35,6 +38,7 @@ runs:
       run: |
         COMMAND=$({
           printf 'export AWS_DEFAULT_REGION=%q\n' "$REGION"
+          printf 'WIREGUARD=%q\n' "$WIREGUARD"
           printf 'GPU=%q\n' "$GPU"
           printf 'REPO_NAME=%q\n' "$REPO_NAME"
           printf 'REPO_REF=%q\n' "$REPO_REF"

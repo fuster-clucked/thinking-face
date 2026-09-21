@@ -24,8 +24,17 @@ curl --fail --show-error --location \
 | tee /etc/apt/sources.list.d/caddy-stable.list
 chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 chmod o+r /etc/apt/sources.list.d/caddy-stable.list
+
+AWS_DCV_DIR=$(mktemp --directory)
+curl --fail --show-error --location \
+    https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-ubuntu2404-x86_64.tgz \
+| tar --extract --ungzip --directory "$AWS_DCV_DIR"
+
 apt-get update > /dev/null
-apt-get install --yes caddy unzip wireguard > /dev/null
+apt-get install --yes \
+    caddy unzip wireguard \
+    "$AWS_DCV_DIR/nice-dcv-2025.0-20103-ubuntu2404-x86_64/nice-dcv-server_2025.0.20103-1_amd64.ubuntu2404.deb" \
+> /dev/null
 
 if ! command -v aws >/dev/null 2>&1; then
     AWS_CLI_DIR=$(mktemp --directory)
@@ -43,25 +52,12 @@ fi
 # Docker is already installed on GPU instances
 if [ "${GPU,,}" != "true" ]; then
     # TODO install docker BuildKit for devcontainer (legacy builder is deprecated)
-    apt-get install --yes docker.io > /dev/null
-else
-    apt-get install --yes xserver-xorg-core x11-xserver-utils xinit > /dev/null
-fi
-
-AWS_DCV_DIR=$(mktemp --directory)
-
-curl --fail --show-error --location \
-    https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-ubuntu2404-x86_64.tgz \
-| tar --extract --ungzip --directory "$AWS_DCV_DIR"
-
-apt-get install --yes \
-    "$AWS_DCV_DIR/nice-dcv-2025.0-20103-ubuntu2404-x86_64/nice-dcv-server_2025.0.20103-1_amd64.ubuntu2404.deb" \
-> /dev/null
-
-if [ "${GPU,,}" != "true" ]; then
     apt-get install --yes \
+        docker.io \
         "$AWS_DCV_DIR/nice-dcv-2025.0-20103-ubuntu2404-x86_64/nice-xdcv_2025.0.688-1_amd64.ubuntu2404.deb" \
     > /dev/null
+else
+    apt-get install --yes xserver-xorg-core x11-xserver-utils xinit > /dev/null
 fi
 
 # TODO don't require curl for code-server install
@@ -70,22 +66,23 @@ curl --fail --show-error --location \
     https://raw.githubusercontent.com/devcontainers/cli/main/scripts/install.sh \
 | sh -s -- --version 0.88.0 --prefix=/usr/local
 
-echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
+if [[ ${WIREGUARD:-false} == true ]]; then
+    echo "net.ipv4.ip_forward = 1" >> /etc/sysctl.conf
 
-WG_SERVER_KEY=$(aws ssm get-parameter \
-    --output text \
-    --query 'Parameter.Value' \
-    --with-decryption \
-    --name /wireguard/SERVER_KEY)
+    WG_SERVER_KEY=$(aws ssm get-parameter \
+        --output text \
+        --query 'Parameter.Value' \
+        --with-decryption \
+        --name /wireguard/SERVER_KEY)
 
-WG_CLIENT_PUB=$(aws ssm get-parameter \
-    --output text \
-    --query 'Parameter.Value' \
-    --with-decryption \
-    --name /wireguard/CLIENT_PUB)
+    WG_CLIENT_PUB=$(aws ssm get-parameter \
+        --output text \
+        --query 'Parameter.Value' \
+        --with-decryption \
+        --name /wireguard/CLIENT_PUB)
 
-mkdir --parents /etc/wireguard
-cat > /etc/wireguard/wg0.conf << WG_CONF
+    mkdir --parents /etc/wireguard
+    cat > /etc/wireguard/wg0.conf << WG_CONF
 [Interface]
 Address = 10.0.0.1/24
 ListenPort = 51820
@@ -97,7 +94,8 @@ PostDown = iptables --delete FORWARD --in-interface wg0 --jump ACCEPT; iptables 
 AllowedIPs = 10.10.0.2/32
 PublicKey = $WG_CLIENT_PUB
 WG_CONF
-chmod 0600 /etc/wireguard/wg0.conf
+    chmod 0600 /etc/wireguard/wg0.conf
+fi
 
 mkdir --parents /etc/caddy
 cat > /etc/caddy/Caddyfile << CADDY_CONF
@@ -168,6 +166,9 @@ ExecStart=/usr/bin/xinit \
     -nolisten tcp \
     -noreset
 ExecStartPost=/bin/bash -c 'for ((i = 1; i <= 30; i++)); do /usr/bin/xset q >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target
 SYSD_CONF
 fi
 
@@ -358,13 +359,13 @@ systemctl daemon-reload
 
 SERVICES=(
     docker.service
-    wg-quick@wg0
     caddy
 )
+if [[ ${WIREGUARD:-false} == true ]]; then
+    SERVICES+=(wg-quick@wg0)
+fi
 if [[ ${GPU,,} == true ]]; then
-    SERVICES+=(
-        xorg.service
-    )
+    SERVICES+=(xorg.service)
 fi
 SERVICES+=(
     dcvserver.service
@@ -388,7 +389,7 @@ for ((i = 1; i <= 120; i++)); do
     for SERVICE in "${SERVICES[@]}"; do
         STATUS=$(systemctl show --property=ActiveState --value "$SERVICE")
         case "$STATUS" in
-            inactive|failed|deactivating)
+            failed)
                 echo "Attempt $i/120 ..."
                 # TODO always send the service output, not just on failure
                 journalctl --no-pager --output=short-precise --unit "$SERVICE" || true

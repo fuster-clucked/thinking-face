@@ -6,12 +6,18 @@ on:
       region:
         type: string
         default: eu-south-2
+      wireguard:
+        type: boolean
+        default: false
 
   workflow_call:
     inputs:
       region:
         type: string
         default: eu-south-2
+      wireguard:
+        type: boolean
+        default: false
 
 permissions:
   id-token: write
@@ -259,15 +265,23 @@ jobs:
           )
           echo "id=$ID" >> $GITHUB_OUTPUT
 
-      - name: Create AWS EC2 WireGuard ingress rule
+      - name: Create AWS EC2 ingress rule
         env:
           GROUP: ${{ steps.group.outputs.id }}
+          WIREGUARD: ${{ inputs.wireguard }}
         run: |
+          if [[ "${WIREGUARD,,}" == true ]]; then
+            PROTOCOL=udp
+            PORT=51820
+          else
+            PROTOCOL=tcp
+            PORT=8443
+          fi
           aws ec2 authorize-security-group-ingress \
             --group-id "$GROUP" \
-            --protocol udp \
+            --protocol "$PROTOCOL" \
             --cidr 0.0.0.0/0 \
-            --port 51820
+            --port "$PORT"
 
       - name: Resolve AWS EC2 AMI
         id: ami
@@ -428,6 +442,7 @@ jobs:
           region: ${{ inputs.region }}
           repo-name: ${{ github.repository }}
           repo-ref: ${{ github.ref }}
+          wireguard: ${{ inputs.wireguard }}
           gpu: ${{ steps.container.outputs.gpu }}
           token: ${{ steps.resource.outputs.token }}
           instance: ${{ steps.instance.outputs.id }}

@@ -494,19 +494,19 @@ jobs:
           OUT=$(aws ssm delete-parameter --name "$TOKEN" 2>&1) \
           || { RC=$?; echo "$OUT" | grep --extended-regexp "\bParameterNotFound\b" || { echo "$OUT" >&2; exit $RC; }; }
 
-      # TODO should the instance optionally be left running for troubleshooting?
-      - name: Terminate AWS EC2 instance
-        # TODO probably doesn't need to check `steps.instance.outputs.id` (gracefully ignore error if instance doesn't exist)
-        if: >-
-          ${{
-            always() &&
-            steps.instance.outputs.id != '' &&
-            steps.provision.outcome != 'success'
-          }}
-        env:
-          INSTANCE: ${{ steps.instance.outputs.id }}
-          SPOT: ${{ steps.instance.outputs.spot }}
-        run: |
-          aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
-          aws ec2 terminate-instances --instance-ids "$INSTANCE"
-          aws ec2 wait instance-terminated --instance-ids "$INSTANCE"
+      # # TODO should the instance optionally be left running for troubleshooting?
+      # - name: Terminate AWS EC2 instance
+      #   # TODO probably doesn't need to check `steps.instance.outputs.id` (gracefully ignore error if instance doesn't exist)
+      #   if: >-
+      #     ${{
+      #       always() &&
+      #       steps.instance.outputs.id != '' &&
+      #       steps.provision.outcome != 'success'
+      #     }}
+      #   env:
+      #     INSTANCE: ${{ steps.instance.outputs.id }}
+      #     SPOT: ${{ steps.instance.outputs.spot }}
+      #   run: |
+      #     aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
+      #     aws ec2 terminate-instances --instance-ids "$INSTANCE"
+      #     aws ec2 wait instance-terminated --instance-ids "$INSTANCE"

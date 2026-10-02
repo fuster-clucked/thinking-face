@@ -57,7 +57,8 @@ if [ "${GPU,,}" != "true" ]; then
         "$AWS_DCV_DIR/nice-dcv-2025.0-20103-ubuntu2404-x86_64/nice-xdcv_2025.0.688-1_amd64.ubuntu2404.deb" \
     > /dev/null
 else
-    apt-get install --yes xserver-xorg-core x11-xserver-utils xinit > /dev/null
+    :
+    # apt-get install --yes xserver-xorg-core x11-xserver-utils xinit > /dev/null
 fi
 
 # TODO don't require curl for code-server install
@@ -132,7 +133,8 @@ DCV_PASSWORD=$(aws ssm get-parameter \
 printf 'dcv:%s\n' "$DCV_PASSWORD" | chpasswd
 
 mkdir --parents /usr/local/libexec
-install --directory --owner=root --group=caddy --mode=2771 /run/thinkingface
+# install --directory --owner=root --group=caddy --mode=2771 /run/thinkingface
+install --directory --owner=root --group=caddy --mode=2770 /run/thinkingface
 
 cat > /usr/local/libexec/keepalive <<'EOF'
 #!/bin/bash
@@ -143,33 +145,34 @@ EOF
 chmod 0755 /usr/local/libexec/keepalive
 
 if [[ ${GPU,,} == true ]]; then
-    nvidia-xconfig \
-        --preserve-busid \
-        --enable-all-gpus \
-        --allow-empty-initial-configuration
+    :
+#     nvidia-xconfig \
+#         --preserve-busid \
+#         --enable-all-gpus \
+#         --allow-empty-initial-configuration
 
-    cat > /etc/systemd/system/xorg.service << 'SYSD_CONF'
-[Unit]
-After=systemd-modules-load.service
+#     cat > /etc/systemd/system/xorg.service << 'SYSD_CONF'
+# [Unit]
+# After=systemd-modules-load.service
 
-[Service]
-Environment=DISPLAY=:0
-Environment=XAUTHORITY=/run/thinkingface/Xauthority
-ExecStartPre=/bin/bash -c 'COOKIE=$(/usr/bin/mcookie); /usr/bin/xauth -f "$XAUTHORITY" add "$DISPLAY" . "$COOKIE"; /usr/bin/chown dcv:caddy "$XAUTHORITY"; /usr/bin/chmod 0640 "$XAUTHORITY"'
-ExecStart=/usr/bin/xinit \
-    /usr/local/libexec/keepalive \
-    -- \
-    /usr/lib/xorg/Xorg \
-    :0 \
-    -auth /run/thinkingface/Xauthority \
-    -config /etc/X11/xorg.conf \
-    -nolisten tcp \
-    -noreset
-ExecStartPost=/bin/bash -c 'for ((i = 1; i <= 30; i++)); do /usr/bin/xset q >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+# [Service]
+# Environment=DISPLAY=:0
+# Environment=XAUTHORITY=/run/thinkingface/Xauthority
+# ExecStartPre=/bin/bash -c 'COOKIE=$(/usr/bin/mcookie); /usr/bin/xauth -f "$XAUTHORITY" add "$DISPLAY" . "$COOKIE"; /usr/bin/chown dcv:caddy "$XAUTHORITY"; /usr/bin/chmod 0640 "$XAUTHORITY"'
+# ExecStart=/usr/bin/xinit \
+#     /usr/local/libexec/keepalive \
+#     -- \
+#     /usr/lib/xorg/Xorg \
+#     :0 \
+#     -auth /run/thinkingface/Xauthority \
+#     -config /etc/X11/xorg.conf \
+#     -nolisten tcp \
+#     -noreset
+# ExecStartPost=/bin/bash -c 'for ((i = 1; i <= 30; i++)); do /usr/bin/xset q >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
 
-[Install]
-WantedBy=multi-user.target
-SYSD_CONF
+# [Install]
+# WantedBy=multi-user.target
+# SYSD_CONF
 fi
 
 cat > /usr/local/libexec/dcv-session-create << 'SYSD_BIN'
@@ -195,37 +198,45 @@ cat > /usr/local/libexec/dcv-session-run << 'SYSD_BIN'
 #!/bin/bash
 set -o errexit -o nounset -o pipefail
 
-if [ "${GPU,,}" != "true" ]; then
-    exec sleep infinity
-else
-    export DISPLAY=:0
-    export XAUTHORITY=/run/thinkingface/Xauthority
-    export XDG_SESSION_TYPE=x11
-    export XDG_SESSION_CLASS=user
-    exec dbus-run-session -- \
-        /bin/bash -c '/usr/lib/x86_64-linux-gnu/dcv/dcvxdgagentlauncher --session-id=workspace --ignore-events; exec sleep infinity'
-fi
+# if [ "${GPU,,}" != "true" ]; then
+#     exec sleep infinity
+# else
+#     export DISPLAY=:0
+#     export XAUTHORITY=/run/thinkingface/Xauthority
+#     export XDG_SESSION_TYPE=x11
+#     export XDG_SESSION_CLASS=user
+#     exec dbus-run-session -- \
+#         /bin/bash -c '/usr/lib/x86_64-linux-gnu/dcv/dcvxdgagentlauncher --session-id=workspace --ignore-events; exec sleep infinity'
+# fi
 SYSD_BIN
-chmod 0755 /usr/local/libexec/dcv-session-run
+# chmod 0755 /usr/local/libexec/dcv-session-run
 
-DCV_DEPS=dcvserver.service
-if [[ ${GPU,,} == true ]]; then
-    DCV_DEPS+=' xorg.service'
-fi
+# DCV_DEPS=dcvserver.service
+# if [[ ${GPU,,} == true ]]; then
+#     DCV_DEPS+=' xorg.service'
+# fi
 
 cat > /etc/systemd/system/dcv-session.service << SYSD_CONF
-[Unit]
-Requires=$DCV_DEPS
-After=$DCV_DEPS
-
 [Service]
-User=dcv
-PAMName=login
+Type=oneshot
 Environment=GPU=${GPU,,}
-ExecStartPre=+/usr/local/libexec/dcv-session-create
-ExecStart=/usr/local/libexec/dcv-session-run
-ExecStopPost=-+/usr/bin/dcv close-session workspace
+ExecStartPre=/usr/local/libexec/dcv-session-create
+ExecStart=/bin/true
+RemainAfterExit=yes
 SYSD_CONF
+# cat > /etc/systemd/system/dcv-session.service << SYSD_CONF
+# [Unit]
+# Requires=$DCV_DEPS
+# After=$DCV_DEPS
+
+# [Service]
+# User=dcv
+# PAMName=login
+# Environment=GPU=${GPU,,}
+# ExecStartPre=+/usr/local/libexec/dcv-session-create
+# ExecStart=/usr/local/libexec/dcv-session-run
+# ExecStopPost=-+/usr/bin/dcv close-session workspace
+# SYSD_CONF
 
 cat > /usr/local/sbin/devcontainer-start << 'SYSD_BIN'
 #!/bin/bash
@@ -264,8 +275,8 @@ XAUTH_ENTRY=$(
 )
 printf '%s\n' "$XAUTH_ENTRY" \
     | xauth -f /run/thinkingface/Xauthority nmerge -
-chown dcv:caddy /run/thinkingface/Xauthority
-chmod 0640 /run/thinkingface/Xauthority
+# chown dcv:caddy /run/thinkingface/Xauthority
+# chmod 0640 /run/thinkingface/Xauthority
 
 export DISPLAY
 export XAUTHORITY=/run/thinkingface/Xauthority
@@ -364,9 +375,9 @@ SERVICES=(
 if [[ ${WIREGUARD:-false} == true ]]; then
     SERVICES+=(wg-quick@wg0)
 fi
-if [[ ${GPU,,} == true ]]; then
-    SERVICES+=(xorg.service)
-fi
+# if [[ ${GPU,,} == true ]]; then
+#     SERVICES+=(xorg.service)
+# fi
 SERVICES+=(
     dcvserver.service
     devcontainer.service

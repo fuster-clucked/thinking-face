@@ -30,11 +30,13 @@ curl --fail --show-error --location \
     https://d1uj6qtbmh3dt5.cloudfront.net/nice-dcv-ubuntu2404-x86_64.tgz \
 | tar --extract --ungzip --directory "$AWS_DCV_DIR"
 
+DCV_SERVER_DEB=$(find "$AWS_DCV_DIR" \
+    -type f \
+    -name 'nice-dcv-server_*_amd64.ubuntu2404.deb' \
+    -print -quit)
+
 apt-get update > /dev/null
-apt-get install --yes \
-    caddy unzip wireguard \
-    "$AWS_DCV_DIR/nice-dcv-2025.0-20103-ubuntu2404-x86_64/nice-dcv-server_2025.0.20103-1_amd64.ubuntu2404.deb" \
-> /dev/null
+apt-get install --yes caddy unzip wireguard "$DCV_SERVER_DEB" > /dev/null
 
 if ! command -v aws >/dev/null 2>&1; then
     AWS_CLI_DIR=$(mktemp --directory)
@@ -51,13 +53,14 @@ fi
 
 # Docker is already installed on GPU instances
 if [ "${GPU,,}" != "true" ]; then
+    XDCV_DEB=$(find "$AWS_DCV_DIR" \
+        -type f \
+        -name 'nice-xdcv_*_amd64.ubuntu2404.deb' \
+        -print -quit)
     # TODO install docker BuildKit for devcontainer (legacy builder is deprecated)
-    apt-get install --yes \
-        docker.io \
-        "$AWS_DCV_DIR/nice-dcv-2025.0-20103-ubuntu2404-x86_64/nice-xdcv_2025.0.688-1_amd64.ubuntu2404.deb" \
-    > /dev/null
+    apt-get install --yes docker.io "$XDCV_DEB" > /dev/null
 else
-    apt-get install --yes xserver-xorg-core x11-xserver-utils xinit > /dev/null
+    apt-get install --yes x11-xserver-utils xinit > /dev/null
 fi
 
 # TODO don't require curl for code-server install
@@ -148,6 +151,12 @@ if [[ ${GPU,,} == true ]]; then
         --enable-all-gpus \
         --allow-empty-initial-configuration
 
+    cat >> /etc/dcv/dcv.conf <<'EOF'
+
+[audio]
+enabled=false
+EOF
+
     cat > /etc/systemd/system/xorg.service << 'SYSD_CONF'
 [Unit]
 After=systemd-modules-load.service
@@ -165,67 +174,38 @@ ExecStart=/usr/bin/xinit \
     -config /etc/X11/xorg.conf \
     -nolisten tcp \
     -noreset
-ExecStartPost=/bin/bash -c 'for ((i = 1; i <= 30; i++)); do /usr/bin/xset q >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
 
 [Install]
 WantedBy=multi-user.target
 SYSD_CONF
 fi
 
-cat > /usr/local/libexec/dcv-session-create << 'SYSD_BIN'
-#!/bin/bash
-set -o errexit -o nounset -o pipefail
-
 if [ "${GPU,,}" != "true" ]; then
-    dcv create-session \
-        --user dcv \
-        --owner dcv \
-        --init /usr/local/libexec/keepalive \
-        workspace
-else
-    dcv create-session \
-        --type=console \
-        --owner dcv \
-        workspace
-fi
-SYSD_BIN
-chmod 0755 /usr/local/libexec/dcv-session-create
-
-cat > /usr/local/libexec/dcv-session-run << 'SYSD_BIN'
-#!/bin/bash
-set -o errexit -o nounset -o pipefail
-
-if [ "${GPU,,}" != "true" ]; then
-    exec sleep infinity
-else
-    export DISPLAY=:0
-    export XAUTHORITY=/run/thinkingface/Xauthority
-    export XDG_SESSION_TYPE=x11
-    export XDG_SESSION_CLASS=user
-    exec dbus-run-session -- \
-        /bin/bash -c '/usr/lib/x86_64-linux-gnu/dcv/dcvxdgagentlauncher --session-id=workspace --ignore-events; exec sleep infinity'
-fi
-SYSD_BIN
-chmod 0755 /usr/local/libexec/dcv-session-run
-
-DCV_DEPS=dcvserver.service
-if [[ ${GPU,,} == true ]]; then
-    DCV_DEPS+=' xorg.service'
-fi
-
-cat > /etc/systemd/system/dcv-session.service << SYSD_CONF
+    cat > /etc/systemd/system/dcv-session.service << 'SYSD_CONF'
 [Unit]
-Requires=$DCV_DEPS
-After=$DCV_DEPS
+Requires=dcvserver.service
+After=dcvserver.service
 
 [Service]
 User=dcv
-PAMName=login
-Environment=GPU=${GPU,,}
-ExecStartPre=+/usr/local/libexec/dcv-session-create
-ExecStart=/usr/local/libexec/dcv-session-run
-ExecStopPost=-+/usr/bin/dcv close-session workspace
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=+/usr/bin/dcv create-session --user dcv --owner dcv --init /usr/local/libexec/keepalive workspace
 SYSD_CONF
+else
+    cat > /etc/systemd/system/dcv-session.service << 'SYSD_CONF'
+[Unit]
+Requires=dcvserver.service
+After=dcvserver.service
+
+[Service]
+User=dcv
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/thinkingface/Xauthority
+ExecStartPre=+/usr/bin/dcv create-session --type=console --owner dcv workspace
+ExecStart=/usr/bin/dbus-run-session -- /bin/bash -c '/usr/lib/x86_64-linux-gnu/dcv/dcvxdgagentlauncher --session-id=workspace --ignore-events; exec sleep infinity'
+SYSD_CONF
+fi
 
 cat > /usr/local/sbin/devcontainer-start << 'SYSD_BIN'
 #!/bin/bash

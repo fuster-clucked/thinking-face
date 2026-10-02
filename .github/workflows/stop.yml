@@ -5,13 +5,13 @@ on:
     inputs:
       region:
         type: string
-        default: eu-south-2
+        default: us-west-2
 
   workflow_call:
     inputs:
       region:
         type: string
-        default: eu-south-2
+        default: us-west-2
 
 permissions:
   id-token: write

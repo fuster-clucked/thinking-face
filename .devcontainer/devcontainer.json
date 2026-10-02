@@ -4,9 +4,10 @@
   },
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
-    "XAUTHORITY": "${localEnv:XAUTHORITY}",
+    "XAUTHORITY": "${localEnv:XAUTHORITY}"
   },
   "hostRequirements": {
     "gpu": true
-  }
+  },
+  "postStartCommand": "nohup sh -c 'openbox & sleep 1; exec blender --window-maximized' &"
 }

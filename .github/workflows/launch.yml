@@ -5,7 +5,7 @@ on:
     inputs:
       region:
         type: string
-        default: eu-south-2
+        default: us-west-2
       wireguard:
         type: boolean
         default: false
@@ -14,7 +14,7 @@ on:
     inputs:
       region:
         type: string
-        default: eu-south-2
+        default: us-west-2
       wireguard:
         type: boolean
         default: false
@@ -80,9 +80,9 @@ jobs:
             printf '%s' "$REPO" | sha256sum | cut --characters=1-8
           )"
           if [ "${GPU,,}" = "true" ]; then
-            TYPE="g6.xlarge"
+            TYPE="g4dn.xlarge"
           else
-            TYPE="m7i-flex.large"
+            TYPE="m8i.large"
           fi
           {
             echo "group=thinkingface-$WORKSPACE-group"
@@ -322,7 +322,7 @@ jobs:
           GROUP: ${{ steps.group.outputs.id }}
           AMI: ${{ steps.ami.outputs.id }}
         run: |
-          # TODO use different Name tags for instance, volumne, and spot request
+          # TODO use different Name tags for instance, volume, and spot request
           #      (update terminate.yml action if spot request Name tag is changed)
           TAGS=$(cat <<EOF
           [
@@ -333,6 +333,16 @@ jobs:
           EOF
           )
           # TODO volume size should be configurable
+          # --instance-market-options '{
+          #   "MarketType": "spot",
+          #   "SpotOptions": {
+          #     "SpotInstanceType": "persistent",
+          #     "InstanceInterruptionBehavior": "stop"
+          #   }
+          # }' \
+            # \"ResourceType\":\"spot-instances-request\",
+            #     \"Tags\":$TAGS
+            #   }, {
           read -r ID ZONE SPOT < <(
             aws ec2 run-instances \
               --output text \
@@ -342,13 +352,6 @@ jobs:
               --iam-instance-profile "Name=$PROFILE" \
               --security-group-ids "$GROUP" \
               --metadata-options 'HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1' \
-              --instance-market-options '{
-                "MarketType": "spot",
-                "SpotOptions": {
-                  "SpotInstanceType": "persistent",
-                  "InstanceInterruptionBehavior": "stop"
-                }
-              }' \
               --block-device-mappings '[{
                 "DeviceName":"/dev/sda1",
                 "Ebs":{
@@ -360,9 +363,6 @@ jobs:
               }]' \
               --tag-specifications "[{
                 \"ResourceType\":\"instance\",
-                \"Tags\":$TAGS
-              }, {
-                \"ResourceType\":\"spot-instances-request\",
                 \"Tags\":$TAGS
               }, {
                 \"ResourceType\":\"volume\",
@@ -494,19 +494,19 @@ jobs:
           OUT=$(aws ssm delete-parameter --name "$TOKEN" 2>&1) \
           || { RC=$?; echo "$OUT" | grep --extended-regexp "\bParameterNotFound\b" || { echo "$OUT" >&2; exit $RC; }; }
 
-      # TODO should the instance optionally be left running for troubleshooting?
-      - name: Terminate AWS EC2 instance
-        # TODO probably doesn't need to check `steps.instance.outputs.id` (gracefully ignore error if instance doesn't exist)
-        if: >-
-          ${{
-            always() &&
-            steps.instance.outputs.id != '' &&
-            steps.provision.outcome != 'success'
-          }}
-        env:
-          INSTANCE: ${{ steps.instance.outputs.id }}
-          SPOT: ${{ steps.instance.outputs.spot }}
-        run: |
-          aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
-          aws ec2 terminate-instances --instance-ids "$INSTANCE"
-          aws ec2 wait instance-terminated --instance-ids "$INSTANCE"
+      # # TODO should the instance optionally be left running for troubleshooting?
+      # - name: Terminate AWS EC2 instance
+      #   # TODO probably doesn't need to check `steps.instance.outputs.id` (gracefully ignore error if instance doesn't exist)
+      #   if: >-
+      #     ${{
+      #       always() &&
+      #       steps.instance.outputs.id != '' &&
+      #       steps.provision.outcome != 'success'
+      #     }}
+      #   env:
+      #     INSTANCE: ${{ steps.instance.outputs.id }}
+      #     SPOT: ${{ steps.instance.outputs.spot }}
+      #   run: |
+      #     aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
+      #     aws ec2 terminate-instances --instance-ids "$INSTANCE"
+      #     aws ec2 wait instance-terminated --instance-ids "$INSTANCE"

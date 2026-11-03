@@ -6,6 +6,9 @@ on:
       region:
         type: string
         default: us-west-2
+      spot:
+        type: boolean
+        default: true
       wireguard:
         type: boolean
         default: false
@@ -15,6 +18,9 @@ on:
       region:
         type: string
         default: us-west-2
+      spot:
+        type: boolean
+        default: true
       wireguard:
         type: boolean
         default: false
@@ -321,6 +327,7 @@ jobs:
           TYPE: ${{ steps.resource.outputs.type }}
           GROUP: ${{ steps.group.outputs.id }}
           AMI: ${{ steps.ami.outputs.id }}
+          SPOT: ${{ inputs.spot }}
         run: |
           # TODO use different Name tags for instance, volume, and spot request
           #      (update terminate.yml action if spot request Name tag is changed)
@@ -332,6 +339,35 @@ jobs:
           ]
           EOF
           )
+          if [[ "${SPOT,,}" == true ]]; then
+            MARKET_OPTS=(
+              --instance-market-options '{
+                "MarketType": "spot",
+                "SpotOptions": {
+                  "SpotInstanceType": "persistent",
+                  "InstanceInterruptionBehavior": "stop"
+                }
+              }'
+            )
+            TAG_SPECS="[{
+              \"ResourceType\":\"instance\",
+              \"Tags\":$TAGS
+            }, {
+              \"ResourceType\":\"spot-instances-request\",
+              \"Tags\":$TAGS
+            }, {
+              \"ResourceType\":\"volume\",
+              \"Tags\":$TAGS
+            }]"
+          else
+            TAG_SPECS="[{
+              \"ResourceType\":\"instance\",
+              \"Tags\":$TAGS
+            }, {
+              \"ResourceType\":\"volume\",
+              \"Tags\":$TAGS
+            }]"
+          fi
           # TODO volume size should be configurable
           read -r ID ZONE SPOT < <(
             aws ec2 run-instances \
@@ -342,13 +378,7 @@ jobs:
               --iam-instance-profile "Name=$PROFILE" \
               --security-group-ids "$GROUP" \
               --metadata-options 'HttpTokens=required,HttpEndpoint=enabled,HttpPutResponseHopLimit=1' \
-              --instance-market-options '{
-                "MarketType": "spot",
-                "SpotOptions": {
-                  "SpotInstanceType": "persistent",
-                  "InstanceInterruptionBehavior": "stop"
-                }
-              }' \
+              "${MARKET_OPTIONS[@]}" \
               --block-device-mappings '[{
                 "DeviceName":"/dev/sda1",
                 "Ebs":{
@@ -358,16 +388,7 @@ jobs:
                   "DeleteOnTermination":true
                 }
               }]' \
-              --tag-specifications "[{
-                \"ResourceType\":\"instance\",
-                \"Tags\":$TAGS
-              }, {
-                \"ResourceType\":\"spot-instances-request\",
-                \"Tags\":$TAGS
-              }, {
-                \"ResourceType\":\"volume\",
-                \"Tags\":$TAGS
-              }]"
+              --tag-specifications "$TAG_SPECS"
           )
           {
             echo "id=$ID"
@@ -405,6 +426,7 @@ jobs:
             --instance-ids "$INSTANCE")
           echo "::notice title=Public IP::$IP"
 
+      # TODO this can be skipped if not using spot market type
       - name: Resolve AWS EC2 spot price
         env:
           TYPE: ${{ steps.resource.outputs.type }}
@@ -507,6 +529,8 @@ jobs:
           INSTANCE: ${{ steps.instance.outputs.id }}
           SPOT: ${{ steps.instance.outputs.spot }}
         run: |
-          aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
+          # if [[ "$SPOT" != None ]]; then
+            aws ec2 cancel-spot-instance-requests --spot-instance-request-ids "$SPOT"
+          # fi
           aws ec2 terminate-instances --instance-ids "$INSTANCE"
           aws ec2 wait instance-terminated --instance-ids "$INSTANCE"

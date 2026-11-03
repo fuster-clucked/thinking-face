@@ -47,6 +47,7 @@ jobs:
           )"
           echo "instance=thinkingface-$WORKSPACE-instance" >> $GITHUB_OUTPUT
 
+      # TODO what to do when market type is not spot ????
       - name: Resolve AWS EC2 spot request
         id: spot
         env:
